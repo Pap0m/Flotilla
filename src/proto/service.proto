@@ -1,7 +1,0 @@
-syntax = "proto3";
-
-package service.main;
-
-message dominance {
-  string blank = 1;
-}

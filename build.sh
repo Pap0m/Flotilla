@@ -1,16 +1,17 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 clean () {
-  rm -rf build/
+  rm -rf builddir/
 }
 
 build() {
-  cmake -B build/
-  cmake --build build/ --parallel
+  meson setup builddir
+  meson compile -C builddir/
 }
 
 run() {
-  ./build/Flotilla
+  meson compile -C builddir/
+  ./builddir/flotilla
 }
 
 if [ "$1" == "build" ]; then
@@ -18,7 +19,7 @@ if [ "$1" == "build" ]; then
 fi
 
 if [ "$1" == "run" ]; then
-  if [ -d "build/" ]; then
+  if [ -d "builddir/" ]; then
     run
   else
     build
