@@ -6,29 +6,39 @@ project(
   default_options : ['warning_level=3', 'cpp_std=c++23'],
 )
 
-zenoh_option = ['-DZENOHCXX_ZENOHC']
+dep_zenohc = dependency('zenohc')
+dep_zenohcxx = dependency('zenohcxx')
+dep_threads = dependency('threads')
+dep_raylib = dependency('raylib')
 
-dependencies = [
-  dependency('uuid'),
-  dependency('zenohc'),
-  dependency('zenohcxx'),
-  dependency('threads')
-]
+zenoh_args = ['-DZENOHCXX_ZENOHC']
 
 # shared_lib = [
 #   shared_library() 
 # ]
 
-sources = [
+agentd_source = [
   'src/agent/main.cpp',
 ]
 
-exe = executable(
-  'agent',
-  sources,
+agent_source = [
+  'src/agent/gui/main.cpp'
+]
+
+executable(
+  'agentd',
+  agentd_source,
   install : false,
-  dependencies : dependencies,
-  cpp_args : zenoh_option,
+  dependencies : [dep_zenohc, dep_zenohcxx],
+  cpp_args : zenoh_args,
 )
 
-test('basic', exe)
+executable(
+  'agent',
+  agent_source,
+  install: false,
+  dependencies: [dep_zenohc, dep_zenohcxx, dep_raylib],
+  cpp_args: zenoh_args,
+)
+
+# test('basic', exe)
