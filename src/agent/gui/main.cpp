@@ -1,9 +1,12 @@
-#include <algorithm>
+#include <print>
 #include <raylib.h>
 #include <regex>
+#include <string>
 #include <utility>
+#include <zenoh/api/closures.hxx>
 #include <zenoh/api/config.hxx>
 #include <zenoh/api/query.hxx>
+#include <zenoh/api/reply.hxx>
 #include <zenoh/api/session.hxx>
 
 #define RAYGUI_IMPLEMENTATION
@@ -13,6 +16,8 @@ typedef enum { SCREEN_LOGIN, SCREEN_HOME, SCREEN_SETTINGS } AppScreen;
 
 #define FONT_SIZE 20
 #define STRING_SIZE 40
+
+AppScreen current_screen = SCREEN_LOGIN;
 
 typedef struct {
   float login_width;
@@ -33,7 +38,7 @@ bool apply_regex_to_string(char* text, std::regex pattern) {
   return false;
 }
 
-void draw_login_screen(LoginData &login, float lw, float lh) {
+void draw_login_screen(LoginData &login, float lw, float lh, zenoh::Session& session) {
     // handle keys
     if (IsKeyPressed(KEY_TAB)) {
       login.active_input = !login.active_input;
@@ -82,7 +87,26 @@ void draw_login_screen(LoginData &login, float lw, float lh) {
 
     // Button Section
     current_y += entry_height + spacing + 20;
-    GuiButton((Rectangle){ login_rect.x + padding, current_y, entry_width, 45 }, "SIGN IN");
+    if (GuiButton((Rectangle){ login_rect.x + padding, current_y, entry_width, 45 }, "LOG IN")) {
+      // prepare credentials string
+      std::string credentials = std::string(login.email) + ":" + std::string(login.password);
+      // get the response form the service
+      session.get("agent/ipc/login", credentials, [](const zenoh::Reply& reply) {
+                    if (reply.is_ok()) {
+                      const auto& sample = reply.get_ok();
+                      std::string status = sample.get_payload().as_string();
+                      std::println("Login status: {}", status);
+
+                      if (status == "OK") {
+                        current_screen = SCREEN_HOME;
+                      }
+                    } else {
+                      std::println("Query error: {}", reply.get_err().get_payload().as_string().c_str());
+                    }
+                  }, []() {}
+                  );
+    }
+    
 
     // resert colors
     GuiSetStyle(TEXTBOX, BORDER_COLOR_NORMAL, ColorToInt(DARKGRAY));
@@ -98,8 +122,6 @@ int main() {
 
   SetTargetFPS(60);
   SetExitKey(-1);
-
-  AppScreen current_screen = SCREEN_LOGIN;
 
   // set Width and Height
   Vector2 scale = GetWindowScaleDPI();
@@ -121,8 +143,17 @@ int main() {
 
   // zenoh
   zenoh::Config config = zenoh::Config::create_default();
-  config.insert_json5("listen/endpoints", "[\"unix/tmp/agentd.sock\"]");
-  zenoh::Session session = zenoh::Session(std::move(config));
+  // config.insert_json5("connect/endpoints", "[\"unix:/tmp/agentd.sock\"]");
+  config.insert_json5("connect/endpoints", "[\"tcp/127.0.0.1:7447\"]");
+  std::optional<zenoh::Session> session;
+  try {
+    session = zenoh::Session::open(std::move(config));
+    std::println("Connected to agentd.");
+  } catch (const zenoh::ZException& e) {
+    std::println(stderr, "Could not connect to agentd: {}. Is the backend running?", e.what());
+    // You can decide to exit or run in "offline mode"
+    return 1; 
+  }
   
   while (!WindowShouldClose()) {
     // update vars
@@ -136,7 +167,7 @@ int main() {
 
     switch (current_screen) {
       case SCREEN_LOGIN:
-        draw_login_screen(login, lw, lh);
+        draw_login_screen(login, lw, lh, *session);
         break;
 
       default:
