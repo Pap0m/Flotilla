@@ -1,12 +1,17 @@
 #include <atomic>
 #include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <linux/sockios.h>
+#include <memory>
 #include <netinet/in.h>
+#include <openssl/bio.h>
+#include <openssl/crypto.h>
 #include <print>
 #include <set>
 #include <stdexcept>
@@ -32,6 +37,12 @@
 #include <zenoh.hxx>
 #include <net/route.h>
 #include <sys/epoll.h>
+#include <openssl/evp.h>
+#include <openssl/ec.h>
+#include <openssl/core_names.h>
+#include <openssl/bio.h>
+
+#define ECC_TYPE "secp256k1"
 
 #define MAX_EVENTS 10
 
@@ -226,7 +237,7 @@ void cleanup(int signum) {
   if (signum != 0) exit(signum);
 }
 
-zenoh::Config setup_dual_transport_config() {
+zenoh::Config create_config() {
   zenoh::Config config = zenoh::Config::create_default();
 
   config.insert_json5("mode", "\"router\"");
@@ -244,37 +255,87 @@ zenoh::Config setup_dual_transport_config() {
   return config;
 }
 
-int main() {
-  // setup signals
-  signal(SIGINT, cleanup);
-  signal(SIGTERM, cleanup);
+// void init_openssl() {
+//   OpenSSL_add_all_algorithms();
+//   ERR_load_BIO_strings();
+//   ERR_load_crypto_strings();
+// }
 
-  try {
-  auto config = setup_dual_transport_config();
-  // session that handles gui and net
-  zenoh::Session session = zenoh::Session::open(std::move(config));
-  
-  std::string net_name = generate_net_name();
-  int tun_fd = open_net_interface(net_name);
+struct OpensslFreeEVP_PKEY {
+  void operator()(EVP_PKEY* ptr) const { EVP_PKEY_free(ptr); }
+};
+struct OpensslFreeBIO {
+  void operator()(BIO* ptr) const { BIO_free(ptr); }
+};
 
-  auto login_handler = session.declare_queryable("agent/ipc/login", [&](const zenoh::Query& query) {
-                                                   std::string credentials = std::string(query.get_parameters());
-                                                   std::println("Auth attempt: {}", credentials);
-                                                   if (credentials == "") {
-                                                     query.reply("agent/ipc/login", "OK");
-                                                   } else {
-                                                     query.reply("agent/ipc/login", "FAIL");
-                                                   }
-                                                 },
-                                                 zenoh::closures::none);
+bool gen_key() {
+  const char* const_name[64];
 
-  // start service
-  service_loop(tun_fd, session);
-  } catch (const std::exception& e) {
-    std::println(stderr, "Critical Error: {}", e.what());
-    cleanup(1);
+  std::unique_ptr<EVP_PKEY, OpensslFreeEVP_PKEY> ec_key(EVP_EC_gen(ECC_TYPE));
+  if (!ec_key) {
+    throw std::runtime_error("Failed to generate ec_key");
   }
 
-  cleanup(0);
+  unsigned char pub[256];
+  size_t pub_len = sizeof(pub);
+  if (!EVP_PKEY_get_octet_string_param(ec_key.get(), OSSL_PKEY_PARAM_PUB_KEY, pub, sizeof(pub), &pub_len)) {
+    throw std::runtime_error("FAILED EVP_PKEY_get_params pub");
+  }
+
+  BIGNUM *priv_bn = nullptr;
+  unsigned char priv[256];
+  if (!EVP_PKEY_get_bn_param(ec_key.get(), OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn)) {
+    throw std::runtime_error("FAILED EVP_PKEY_get_params Priv");
+  }
+
+  // BIO *out = BIO_new_fp(stdout, BIO_NOCLOSE);
+  FILE *ec_key_fd = fopen("keys.txt", "w");
+  if (!EVP_PKEY_print_private_fp(ec_key_fd, ec_key.get(), 0, nullptr)) {
+    fclose(ec_key_fd);
+    throw std::runtime_error("FAILED EVP_PKEY_print_private");
+  }
+
+  if (!EVP_PKEY_print_public_fp(ec_key_fd, ec_key.get(), 0, nullptr)) {
+    fclose(ec_key_fd);
+    throw std::runtime_error("FAILED EVP_PKEY_print_public");
+  }
+  fclose(ec_key_fd);
+
+  return true;
+}
+
+int main() {
+  gen_key();
+  // // setup signals
+  // signal(SIGINT, cleanup);
+  // signal(SIGTERM, cleanup);
+
+  // try {
+  // auto config = create_config();
+  // // session that handles gui and net
+  // zenoh::Session session = zenoh::Session::open(std::move(config));
+  
+  // std::string net_name = generate_net_name();
+  // int tun_fd = open_net_interface(net_name);
+
+  // auto login_handler = session.declare_queryable("agent/ipc/login", [&](const zenoh::Query& query) {
+  //                                                  std::string credentials = std::string(query.get_parameters());
+  //                                                  std::println("Auth attempt: {}", credentials);
+  //                                                  if (credentials == "") {
+  //                                                    query.reply("agent/ipc/login", "OK");
+  //                                                  } else {
+  //                                                    query.reply("agent/ipc/login", "FAIL");
+  //                                                  }
+  //                                                },
+  //                                                zenoh::closures::none);
+
+  // // start service
+  // service_loop(tun_fd, session);
+  // } catch (const std::exception& e) {
+  //   std::println(stderr, "Critical Error: {}", e.what());
+  //   cleanup(1);
+  // }
+
+  // cleanup(0);
   return 0;
 }

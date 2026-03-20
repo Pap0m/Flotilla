@@ -10,6 +10,7 @@ dep_zenohc = dependency('zenohc')
 dep_zenohcxx = dependency('zenohcxx')
 dep_threads = dependency('threads')
 dep_raylib = dependency('raylib')
+dep_openssl = dependency('openssl')
 
 zenoh_args = ['-DZENOHCXX_ZENOHC']
 
@@ -29,7 +30,7 @@ executable(
   'agentd',
   agentd_source,
   install : false,
-  dependencies : [dep_zenohc, dep_zenohcxx],
+  dependencies : [dep_zenohc, dep_zenohcxx, dep_openssl],
   cpp_args : zenoh_args,
 )
 
