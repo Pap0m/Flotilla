@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <linux/sockios.h>
 #include <memory>
 #include <netinet/in.h>
+#include <openssl/asn1.h>
 #include <openssl/bio.h>
 #include <openssl/crypto.h>
 #include <print>
@@ -37,10 +39,16 @@
 #include <zenoh.hxx>
 #include <net/route.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #include <openssl/evp.h>
 #include <openssl/ec.h>
 #include <openssl/core_names.h>
 #include <openssl/bio.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+
+#define SERVICE_DIR "/etc/agentd/"
 
 #define ECC_TYPE "secp256k1"
 
@@ -261,81 +269,100 @@ zenoh::Config create_config() {
 //   ERR_load_crypto_strings();
 // }
 
-struct OpensslFreeEVP_PKEY {
-  void operator()(EVP_PKEY* ptr) const { EVP_PKEY_free(ptr); }
-};
-struct OpensslFreeBIO {
-  void operator()(BIO* ptr) const { BIO_free(ptr); }
-};
 
-bool gen_key() {
-  const char* const_name[64];
+void gen_crt(EVP_PKEY *ec_key, const std::filesystem::path csr_path) {
+  std::unique_ptr<X509_REQ, decltype(&X509_REQ_free)> req(X509_REQ_new(), X509_REQ_free);
+  if (!req) {
+    throw std::runtime_error("Failed to create X509_REQ");
+  }
+  X509_REQ_set_version(req.get(), 0);
 
-  std::unique_ptr<EVP_PKEY, OpensslFreeEVP_PKEY> ec_key(EVP_EC_gen(ECC_TYPE));
+  char hostname[256] = {0};
+  if (gethostname(hostname, sizeof(hostname)) < 0) {
+    throw std::runtime_error("Failed to get hostname");  
+  }
+
+  // set the subject name
+  X509_NAME *name = X509_REQ_get_subject_name(req.get());
+  X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (unsigned char*)"XX", -1, -1, 0);
+  X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (unsigned char*)"ZTNA-Agent", -1, -1, 0);
+  X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char*)hostname, -1, -1, 0);
+
+  // associate the public key with the CSR
+  X509_REQ_set_pubkey(req.get(), ec_key);
+  // sign the CSR with the private key
+  if (!X509_REQ_sign(req.get(), ec_key, EVP_sha256())) {
+    throw std::runtime_error("Failed to sign CSR");
+  }
+
+  std::unique_ptr<BIO, decltype(&BIO_free)> bio_csr(BIO_new_file(csr_path.c_str(), "w"), BIO_free); 
+  if (!bio_csr || !PEM_write_bio_X509_REQ(bio_csr.get(), req.get())) {
+    throw std::runtime_error("Failed to write CSR file");
+  }
+}
+
+void gen_key(const std::filesystem::path& dir_path) {
+  if (!std::filesystem::exists(dir_path)) {
+    std::filesystem::create_directories(dir_path);
+  }
+  std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> ec_key(EVP_EC_gen(ECC_TYPE), EVP_PKEY_free);
   if (!ec_key) {
     throw std::runtime_error("Failed to generate ec_key");
   }
 
-  unsigned char pub[256];
-  size_t pub_len = sizeof(pub);
-  if (!EVP_PKEY_get_octet_string_param(ec_key.get(), OSSL_PKEY_PARAM_PUB_KEY, pub, sizeof(pub), &pub_len)) {
-    throw std::runtime_error("FAILED EVP_PKEY_get_params pub");
+  std::filesystem::path priv_path = dir_path / ECC_TYPE".key";
+  std::filesystem::path pub_path = dir_path / ECC_TYPE".pem";
+  std::unique_ptr<BIO, decltype(&BIO_free)> bio_priv(BIO_new_file(priv_path.c_str(), "w"), BIO_free); 
+  if (!bio_priv || !PEM_write_bio_PrivateKey(bio_priv.get(), ec_key.get(), nullptr, nullptr, 0, nullptr, nullptr)) {
+    throw std::runtime_error("Failed to write private key");
+  }
+  std::unique_ptr<BIO, decltype(&BIO_free)> bio_pub(BIO_new_file(pub_path.c_str(), "w"), BIO_free); 
+  if (!bio_pub || !PEM_write_bio_PUBKEY(bio_pub.get(), ec_key.get())) {
+    throw std::runtime_error("Failed to write public key");
   }
 
-  BIGNUM *priv_bn = nullptr;
-  unsigned char priv[256];
-  if (!EVP_PKEY_get_bn_param(ec_key.get(), OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn)) {
-    throw std::runtime_error("FAILED EVP_PKEY_get_params Priv");
-  }
+  std::filesystem::permissions(priv_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write, std::filesystem::perm_options::replace);
+  std::filesystem::permissions(pub_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write, std::filesystem::perm_options::replace);
 
-  // BIO *out = BIO_new_fp(stdout, BIO_NOCLOSE);
-  FILE *ec_key_fd = fopen("keys.txt", "w");
-  if (!EVP_PKEY_print_private_fp(ec_key_fd, ec_key.get(), 0, nullptr)) {
-    fclose(ec_key_fd);
-    throw std::runtime_error("FAILED EVP_PKEY_print_private");
-  }
-
-  if (!EVP_PKEY_print_public_fp(ec_key_fd, ec_key.get(), 0, nullptr)) {
-    fclose(ec_key_fd);
-    throw std::runtime_error("FAILED EVP_PKEY_print_public");
-  }
-  fclose(ec_key_fd);
-
-  return true;
+  gen_crt(ec_key.get(), SERVICE_DIR"tls/certificates");
 }
 
 int main() {
-  gen_key();
-  // // setup signals
-  // signal(SIGINT, cleanup);
-  // signal(SIGTERM, cleanup);
+  if (!(geteuid() == 0)) {
+    throw std::runtime_error("Run the agentd service as root");
+  }
+  // setup signals
+  signal(SIGINT, cleanup);
+  signal(SIGTERM, cleanup);
 
-  // try {
-  // auto config = create_config();
-  // // session that handles gui and net
-  // zenoh::Session session = zenoh::Session::open(std::move(config));
+  try {
+  gen_key(SERVICE_DIR"tls/keys");
+
+  auto config = create_config();
+  // session that handles gui and net
+  zenoh::Session session = zenoh::Session::open(std::move(config));
   
-  // std::string net_name = generate_net_name();
-  // int tun_fd = open_net_interface(net_name);
+  std::string net_name = generate_net_name();
+  int tun_fd = open_net_interface(net_name);
 
-  // auto login_handler = session.declare_queryable("agent/ipc/login", [&](const zenoh::Query& query) {
-  //                                                  std::string credentials = std::string(query.get_parameters());
-  //                                                  std::println("Auth attempt: {}", credentials);
-  //                                                  if (credentials == "") {
-  //                                                    query.reply("agent/ipc/login", "OK");
-  //                                                  } else {
-  //                                                    query.reply("agent/ipc/login", "FAIL");
-  //                                                  }
-  //                                                },
-  //                                                zenoh::closures::none);
+  auto login_handler = session.declare_queryable("agent/ipc/login", [&](const zenoh::Query& query) {
+                                                   std::string credentials = std::string(query.get_parameters());
+                                                   std::println("Auth attempt: {}", credentials);
+                                                   if (credentials == "") {
+                                                     query.reply("agent/ipc/login", "OK");
+                                                   } else {
+                                                     query.reply("agent/ipc/login", "FAIL");
+                                                   }
+                                                 },
+                                                 zenoh::closures::none);
 
-  // // start service
-  // service_loop(tun_fd, session);
-  // } catch (const std::exception& e) {
-  //   std::println(stderr, "Critical Error: {}", e.what());
-  //   cleanup(1);
-  // }
+  // start service
+  service_loop(tun_fd, session);
+  } catch (const std::exception& e) {
+    std::println(stderr, "Critical Error: {}", e.what());
+    cleanup(1);
+  }
 
-  // cleanup(0);
+  cleanup(0);
   return 0;
 }
