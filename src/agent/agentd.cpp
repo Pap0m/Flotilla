@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,7 @@
 #include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#include <thread>
 #include <unistd.h>
 #include <netinet/ip.h>
 #include <arpa/inet.h>
@@ -48,6 +50,10 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include "NetworkManager.hpp"
+
+#define ZENOHCXX_ZENOHC
+
 #define SERVICE_DIR "/etc/agentd/"
 
 #define ECC_TYPE "secp256k1"
@@ -58,57 +64,6 @@ std::atomic<bool> running(true);
 int global_tun_fd = -1;
 std::string global_net_name;
 
-std::string generate_net_name() {
-  struct ifaddrs *address_info = nullptr;
-  std::set<std::string> interface_names;
-
-  if (getifaddrs(&address_info) < 0) {
-    throw std::runtime_error("Error get net info");
-  } 
-
-  for (ifaddrs * current = address_info; current != nullptr; current = current->ifa_next) {
-    if (current->ifa_name) {
-      interface_names.insert(current->ifa_name);
-    }
-  }
-
-  freeifaddrs(address_info);
-
-  std::string base_name = "agent";
-  std::uint8_t net_number = 0;
-  std::uint8_t try_limit = 10;
-  
-  while (net_number < try_limit) {
-    std::string temp_name = base_name + std::to_string(net_number);
-    if (!interface_names.contains(temp_name)) {
-      return temp_name;
-    }
-    net_number++;
-  }
-  throw std::runtime_error("Failed to find an available virtual net name (agent0-agent9)");
-}
-
-int open_net_interface(std::string& net_name) {
-  struct ifreq ifr;
-  std::string tun_path = "/dev/net/tun";
-  int tun_fd, err;
-  if ((tun_fd = open(tun_path.c_str(), O_RDWR)) < 0) {
-    throw std::runtime_error("Open /dev/net/tun");
-  }
-
-  std::memset(&ifr, 0, sizeof(ifr));
-  ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-  // set interface name
-  std::strncpy(ifr.ifr_name, net_name.c_str(), IFNAMSIZ);
-
-  if ((err = ioctl(tun_fd, TUNSETIFF, (void*)&ifr)) < 0) {
-    close(tun_fd);
-    throw std::runtime_error("ioctl TUNSETIFF");
-  }
-  net_name = ifr.ifr_name;
-
-  return tun_fd;
-}
 
 bool service_loop(int tun_fd, zenoh::Session& session) {
   struct epoll_event ev, events[MAX_EVENTS];
@@ -331,38 +286,40 @@ int main() {
   if (!(geteuid() == 0)) {
     throw std::runtime_error("Run the agentd service as root");
   }
-  // setup signals
-  signal(SIGINT, cleanup);
-  signal(SIGTERM, cleanup);
+  Agentd::NetworkManager net = Agentd::NetworkManager("agent0");
+  std::this_thread::sleep_for(std::chrono::seconds(60));
+  // // setup signals
+  // signal(SIGINT, cleanup);
+  // signal(SIGTERM, cleanup);
 
-  try {
-  gen_key(SERVICE_DIR"tls/keys");
+  // try {
+  // gen_key(SERVICE_DIR"tls/keys");
 
-  auto config = create_config();
-  // session that handles gui and net
-  zenoh::Session session = zenoh::Session::open(std::move(config));
+  // auto config = create_config();
+  // // session that handles gui and net
+  // zenoh::Session session = zenoh::Session::open(std::move(config));
   
-  std::string net_name = generate_net_name();
-  int tun_fd = open_net_interface(net_name);
+  // std::string net_name = generate_net_name();
+  // int tun_fd = open_net_interface(net_name);
 
-  auto login_handler = session.declare_queryable("agent/ipc/login", [&](const zenoh::Query& query) {
-                                                   std::string credentials = std::string(query.get_parameters());
-                                                   std::println("Auth attempt: {}", credentials);
-                                                   if (credentials == "") {
-                                                     query.reply("agent/ipc/login", "OK");
-                                                   } else {
-                                                     query.reply("agent/ipc/login", "FAIL");
-                                                   }
-                                                 },
-                                                 zenoh::closures::none);
+  // auto login_handler = session.declare_queryable("agent/ipc/login", [&](const zenoh::Query& query) {
+  //                                                  std::string credentials = std::string(query.get_parameters());
+  //                                                  std::println("Auth attempt: {}", credentials);
+  //                                                  if (credentials == "") {
+  //                                                    query.reply("agent/ipc/login", "OK");
+  //                                                  } else {
+  //                                                    query.reply("agent/ipc/login", "FAIL");
+  //                                                  }
+  //                                                },
+  //                                                zenoh::closures::none);
 
-  // start service
-  service_loop(tun_fd, session);
-  } catch (const std::exception& e) {
-    std::println(stderr, "Critical Error: {}", e.what());
-    cleanup(1);
-  }
+  // // start service
+  // service_loop(tun_fd, session);
+  // } catch (const std::exception& e) {
+  //   std::println(stderr, "Critical Error: {}", e.what());
+  //   cleanup(1);
+  // }
 
-  cleanup(0);
+  // cleanup(0);
   return 0;
 }

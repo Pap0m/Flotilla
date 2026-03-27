@@ -6,40 +6,30 @@ project(
   default_options : ['warning_level=3', 'cpp_std=c++23'],
 )
 
-dep_zenohc = dependency('zenohc')
-dep_zenohcxx = dependency('zenohcxx')
-dep_threads = dependency('threads')
-dep_raylib = dependency('raylib')
-dep_openssl = dependency('openssl')
+add_project_arguments('-DZENOHCXX_ZENOHC', language: 'cpp')
 
-zenoh_args = ['-DZENOHCXX_ZENOHC']
+inc_dir = include_directories('src')
 
-# shared_lib = [
-#   shared_library() 
+zenohc_dep = dependency('zenohc', required: true)
+zenohcxx_dep = dependency('zenohcxx', required: true)
+zenoh_dep = [zenohc_dep, zenohcxx_dep]
+# threads_dep = dependency('threads', required: true)
+raylib_dep = dependency('raylib', required: true)
+openssl_dep = dependency('openssl', required: true)
+
+subdir('src/agent')
+# subdir('src/controller')
+
+# controller_source = [
+#   'src/controller/controller.cpp'
 # ]
 
-agentd_source = [
-  'src/agent/main.cpp',
-]
-
-agent_source = [
-  'src/agent/gui/main.cpp'
-]
-
-executable(
-  'agentd',
-  agentd_source,
-  install : false,
-  dependencies : [dep_zenohc, dep_zenohcxx, dep_openssl],
-  cpp_args : zenoh_args,
-)
-
-executable(
-  'agent',
-  agent_source,
-  install: false,
-  dependencies: [dep_zenohc, dep_zenohcxx, dep_raylib],
-  cpp_args: zenoh_args,
-)
+# executable(
+#   'controller',
+#   controller_source,
+#   install: false,
+#   dependencies: [zenoh_dep, openssl_dep],
+#   cpp_args: zenoh_args,
+# )
 
 # test('basic', exe)
