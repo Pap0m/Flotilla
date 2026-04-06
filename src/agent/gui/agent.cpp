@@ -91,7 +91,7 @@ void draw_login_screen(LoginData &login, float lw, float lh, zenoh::Session& ses
       // prepare credentials string
       std::string credentials = std::string(login.email) + ":" + std::string(login.password);
       // get the response form the service
-      session.get("agent/ipc/login", credentials, [](const zenoh::Reply& reply) {
+      session.get("flotilla/agent/login", credentials, [](const zenoh::Reply& reply) {
                     if (reply.is_ok()) {
                       const auto& sample = reply.get_ok();
                       std::string status = sample.get_payload().as_string();

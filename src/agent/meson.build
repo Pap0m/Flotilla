@@ -1,11 +1,10 @@
 agentd_sources = [
-  # 'AgentService.cpp',
-  # 'IdentityManager.cpp',
-  # 'IpcHandler.cpp',
-  'NetworkManager.cpp',
-  # 'ZenohController.cpp'
-  'zenoh/ZenohConfigProfile.cpp',
-  'agentd.cpp'
+  # 'Agent_Dispatcher.cpp',
+  # 'zenoh/Session_Factory.cpp',
+  # 'zenoh/Connection_Strategy.cpp',
+  # 'network/Session_Manager.cpp',
+  # 'agentd.cpp'
+  'agent_proc.cpp'
 ]
 
 agentd_libs = static_library('agentd_core',
