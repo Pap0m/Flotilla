@@ -15,6 +15,8 @@
 #include <zenoh.hxx>
 #include <zenoh/api/closures.hxx>
 
+#include "credentials.h"
+
 enum class Event_State { NONE, BOOT_TLS, UPGRADE_TLS, TIMEOUT, SHUTDOWN };
 
 struct Mem_File {
@@ -37,9 +39,11 @@ struct Agent_Ctx {
     std::mutex mtx;
     std::condition_variable cv;
 
-    // timeout tracking
+    // Standard 8-hour session duration    
     std::chrono::seconds session_duration{28800};
     bool is_authenticated = false;
+
+    Agent_Ctx() = default;
 
     ~Agent_Ctx() {
         for (auto& [name, file] : ram_files) {
@@ -48,7 +52,7 @@ struct Agent_Ctx {
     }
 };
 
-// --- Utilities: RAM Filesystem & OpenSSL ---
+// --- Utilities ---
 
 std::string write_to_ram(Agent_Ctx& ctx, const std::string& name, const std::string& data) {
     // If overwrite, close old FD
@@ -76,7 +80,7 @@ std::string to_pem_string(T* obj, WriteFunc write_func) {
     return std::string(data, len);
 }
 
-// --- Standardized Crypto Generators ---
+// --- Crypto ---
 
 void crypto_init_keys(Agent_Ctx& ctx) {
     ctx.pkey.reset(EVP_EC_gen("secp256k1"));
@@ -86,12 +90,8 @@ void crypto_init_keys(Agent_Ctx& ctx) {
     write_to_ram(ctx, "priv_key.pem", pem);
 }
 
-// inject the controller root ca
 void crypto_inject_root_ca(Agent_Ctx& ctx, const std::string& pem_content) {
-    if (pem_content.empty()) {
-        std::cerr << "[Crypto] Error: Root CA content is empty" << std::endl;
-        return;
-    }
+    if (pem_content.empty()) return;
     write_to_ram(ctx, "root_ca.pem", pem_content);
 }
 
@@ -126,7 +126,7 @@ zenoh::Config build_zenoh_config(Agent_Ctx& ctx, bool use_mtls) {
     return config;
 }
 
-// --- Handlers & Routes (Function Pointer Style) ---
+// --- Handlers & Routes ---
 
 void on_login_query(const zenoh::Query& query, Agent_Ctx& ctx) {
     std::string credentials = std::string(query.get_parameters());
@@ -154,12 +154,9 @@ void on_login_query(const zenoh::Query& query, Agent_Ctx& ctx) {
 
 void handle_state_boot(Agent_Ctx& ctx) {
     ctx.is_authenticated = false;
+    ctx.active_routes.clear();
 
-    if (ctx.session) {
-        ctx.active_routes.clear();
-        ctx.session->close();
-        ctx.session.reset();
-    }
+    if (ctx.session) ctx.session->close();
 
     // Config: No client certs, just the Root CA to verify the controller
     ctx.session = zenoh::Session::open(build_zenoh_config(ctx, false));
@@ -174,17 +171,11 @@ void handle_state_boot(Agent_Ctx& ctx) {
 
 void handle_state_upgrade(Agent_Ctx& ctx) {
     ctx.active_routes.clear();
-    if (ctx.session) {
-        ctx.session->close();
-        ctx.session.reset();
-    }
+    if (ctx.session) ctx.session->close();
 
     // Now config includes the cert.pem we just received
     ctx.session = zenoh::Session::open(build_zenoh_config(ctx, true));
     ctx.is_authenticated = true;
-    
-    std::cout << "[Agent] mTLS Session Established. Hardware interaction enabled." << std::endl;
-
     
     // {
     //     std::lock_guard<std::mutex> lock(ctx.mtx);
@@ -194,8 +185,6 @@ void handle_state_upgrade(Agent_Ctx& ctx) {
 }
 
 void handle_state_timeout(Agent_Ctx& ctx) {
-    std::cout << "[Agent] Session expired. Clearing sensitive RAM files." << std::endl;
-
     // Wipe the signed certificate from memory
     if (ctx.ram_files.count("cert.pem")) {
         close(ctx.ram_files["cert.pem"].fd);
@@ -214,24 +203,19 @@ void run_service(Agent_Ctx& ctx) {
       { Event_State::UPGRADE_TLS, handle_state_upgrade },
       { Event_State::TIMEOUT, handle_state_timeout },
     };  
-
-    bool running = true;
     {
         std::lock_guard<std::mutex> lock(ctx.mtx);
         ctx.last_event = Event_State::BOOT_TLS;
     }
-    while (running) {
+    while (true) {
         Event_State job;
         {
             std::unique_lock<std::mutex> lock(ctx.mtx);
 
             // If we are in UPGRADE_TLS, we wait for the timeout
             if (ctx.is_authenticated) {
-                auto status = ctx.cv.wait_for(lock, ctx.session_duration, [&]() {
-                    return ctx.last_event != Event_State::NONE; 
-                });
-
-                if (!status) {
+                // Wait for 8 hours or an explicit event
+                if (!ctx.cv.wait_for(lock, ctx.session_duration, [&]{ return ctx.last_event != Event_State::NONE; })) {
                     ctx.last_event = Event_State::TIMEOUT;
                 }
             } else {
@@ -242,13 +226,8 @@ void run_service(Agent_Ctx& ctx) {
             ctx.last_event = Event_State::NONE;
         }
 
-        // Execute the handler outside of the lock to keep the system responsive
-        auto it = state_handlers.find(job);
-        if (it != state_handlers.end()) {
-            it->second(ctx);
-        } else {
-            running = false;
-        }
+        if (state_handlers.count(job)) state_handlers[job](ctx);
+        if (job == Event_State::SHUTDOWN) break;
     }
 }
 
@@ -256,6 +235,7 @@ int main() {
     Agent_Ctx agent_ctx;
 
     crypto_init_keys(agent_ctx);
+    crypto_inject_root_ca(agent_ctx, CONTROLLER_ROOT_CA);
 
     run_service(agent_ctx);
 
